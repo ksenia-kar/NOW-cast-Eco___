@@ -1,0 +1,246 @@
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7735.h>
+#include <SPI.h>
+#include "DHT.h"
+#include <EEPROM.h>
+#include <WiFi.h>
+#include <esp_now.h>
+
+#define TFT_CS 5
+#define TFT_RST 26
+#define TFT_DC 27
+Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
+
+#define DHTPIN 4
+#define DHTTYPE DHT11
+DHT dht(DHTPIN, DHTTYPE);
+
+// ==== ДАТЧИКИ ====
+#define SOIL_PIN 34      // влажность почвы
+#define LDR_PIN 14       // фоторезистор
+
+#define ENCODER_CLK 22
+#define ENCODER_DT 19
+int lastCLKState;
+unsigned long lastEncoderTime = 0;
+bool encoderMoving = false;
+
+float battery = 50;
+float lastBatterySave = 0;
+
+float temperature = 0;
+float humidity = 0;
+float soilMoisture = 0;
+float saved_t = 0;
+float saved_h = 0;
+float saved_soil = 0;
+
+bool sunMode = false;
+bool windMode = false;
+String currentMode = "";
+String lastMode = "";
+
+void saveData() {
+  EEPROM.begin(512);
+  EEPROM.put(0, temperature);
+  EEPROM.put(10, humidity);
+  EEPROM.put(20, soilMoisture);
+  EEPROM.commit();
+  EEPROM.end();
+  Serial.println("Data saved to EEPROM");
+}
+
+void loadData() {
+  EEPROM.begin(512);
+  EEPROM.get(0, saved_t);
+  EEPROM.get(10, saved_h);
+  EEPROM.get(20, saved_soil);
+  EEPROM.end();
+  Serial.println("Data loaded from EEPROM");
+}
+
+void showSavedData() {
+  tft.fillScreen(ST77XX_BLACK);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setTextSize(2);
+  
+  tft.setCursor(20, 30);
+  tft.print("SAVED");
+  tft.setCursor(20, 50);
+  tft.print("DATA");
+  
+  delay(2000);
+  
+  tft.fillScreen(ST77XX_BLACK);
+  tft.setTextSize(1);
+  tft.setCursor(10, 20);
+  tft.print("Temp: "); tft.print(saved_t); tft.println(" C");
+  tft.setCursor(10, 35);
+  tft.print("Hum: "); tft.print(saved_h); tft.println("%");
+  tft.setCursor(10, 50);
+  tft.print("Soil: "); tft.print(saved_soil); tft.println("%");
+  
+  delay(3000);
+}
+
+void setup() {
+  Serial.begin(115200);
+  
+  tft.initR(INITR_BLACKTAB);
+  tft.setRotation(1);
+  tft.fillScreen(ST77XX_BLACK);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setTextSize(1);
+  tft.setCursor(10, 50);
+  tft.print("System Starting...");
+  
+  dht.begin();
+  
+  pinMode(SOIL_PIN, INPUT);
+  pinMode(LDR_PIN, INPUT);
+  pinMode(ENCODER_CLK, INPUT_PULLUP);
+  pinMode(ENCODER_DT, INPUT_PULLUP);
+  
+  lastCLKState = digitalRead(ENCODER_CLK);
+  
+  loadData();
+  
+  // WiFi и ESP-NOW
+  WiFi.mode(WIFI_STA);
+  esp_now_init();
+  
+  delay(500);
+  tft.fillScreen(ST77XX_BLACK);
+}
+
+void loop() {
+  humidity = dht.readHumidity();
+  temperature = dht.readTemperature();
+  soilMoisture = map(analogRead(SOIL_PIN), 0, 4095, 0, 100);
+  
+  if (isnan(humidity)) humidity = 0;
+  if (isnan(temperature)) temperature = 0;
+  
+  int lightValue = analogRead(LDR_PIN);
+  sunMode = (lightValue < 1000); // светло = true, темно = false
+  
+  int currentCLK = digitalRead(ENCODER_CLK);
+  
+  if (currentCLK != lastCLKState) {
+    encoderMoving = true;
+    lastEncoderTime = millis();
+    
+    if (digitalRead(ENCODER_DT) != currentCLK) {
+      battery += 2; // зарядка
+      if (battery > 100) battery = 100;
+      Serial.println("Charging +2%");
+    } else {
+      battery -= 2; // разрядка
+      if (battery < 0) battery = 0;
+      Serial.println("Discharging -2%");
+    }
+    
+    lastCLKState = currentCLK;
+  }
+  
+  if (millis() - lastEncoderTime > 3000) {
+    encoderMoving = false;
+  }
+  
+  windMode = encoderMoving;
+  
+
+  if (sunMode && !windMode) {
+    currentMode = "SUN";
+  } else if (!sunMode && windMode) {
+    currentMode = "WIND";
+  } else if (sunMode && windMode) {
+    currentMode = "HYBRID";
+  } else {
+    currentMode = "IDLE";
+  }
+  
+
+  if (currentMode != lastMode) {
+    Serial.print("Mode changed to: ");
+    Serial.println(currentMode);
+    lastMode = currentMode;
+  }
+  
+
+  if (battery <= 0) {
+    battery = 0;
+    Serial.println("BATTERY DEAD - System shutting down");
+    
+
+    saveData();
+    
+
+    tft.fillScreen(ST77XX_BLACK);
+    delay(10000);
+    
+
+    showSavedData();
+    
+
+    battery = 20;
+    Serial.println("System restarted with 20% battery");
+  }
+  
+
+  if (millis() - lastBatterySave > 60000) {
+    saveData();
+    lastBatterySave = millis();
+  }
+  
+  tft.fillScreen(ST77XX_BLACK);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setTextSize(1);
+  
+  // Режим работы
+  tft.setCursor(5, 5);
+  tft.print("Mode: ");
+  tft.print(currentMode);
+  
+  tft.setCursor(15, 35);
+  tft.print("Temp: ");
+  tft.print(temperature, 1);
+  tft.print(" C");
+  
+  tft.setCursor(15, 55);
+  tft.print("Hum: ");
+  tft.print(humidity, 1);
+  tft.print("%");
+  
+  tft.setCursor(15, 75);
+  tft.print("Soil: ");
+  tft.print(soilMoisture, 0);
+  tft.print("%");
+  
+  tft.setCursor(15, 100);
+  tft.print("Batt: ");
+  tft.print((int)battery);
+  tft.print("%");
+  
+  tft.setCursor(5, 120);
+  tft.print("L:");
+  tft.print(lightValue);
+  
+  static unsigned long lastESPNOW = 0;
+  if (millis() - lastESPNOW > 2000) {
+    Serial.print("ESP-NOW >> ");
+    Serial.print("Mode:");
+    Serial.print(currentMode);
+    Serial.print(", Temp:");
+    Serial.print(temperature, 1);
+    Serial.print(", Hum:");
+    Serial.print(humidity, 1);
+    Serial.print(", Soil:");
+    Serial.print(soilMoisture, 0);
+    Serial.print(", Batt:");
+    Serial.println((int)battery);
+    lastESPNOW = millis();
+  }
+  
+  delay(300);
+}
